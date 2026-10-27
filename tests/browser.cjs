@@ -173,8 +173,62 @@ const fs = require('node:fs/promises');
     assert.equal(await page.locator('#start-camera').isEnabled(),true);
     assert.equal(await page.locator('#camera-screen').evaluate(dialog => dialog.open),false,'denial unlocks the page');
     assert.equal(await page.locator('html').evaluate(el => el.classList.contains('camera-open')),false);
+
+    // Seed another site and day to exercise real ZIP button selections offline.
+    await page.evaluate(async () => {
+      const db=await new Promise(resolve=>{const r=indexedDB.open('genba-photo',1);r.onsuccess=()=>resolve(r.result);});
+      const all=await new Promise(resolve=>{const r=db.transaction('photos').objectStore('photos').getAll();r.onsuccess=()=>resolve(r.result);});
+      const original=all.find(p=>p.metadata.source==='file-import'), day=original.metadata.recordedDate;
+      const tx=db.transaction('photos','readwrite');
+      for (const [id,site,date] of [['zip-site','別地点',day],['zip-old','前日の地点','20261026']]) {
+        const m={...original.metadata,id,site,recordedDate:date};
+        m.composedFile=`${date}__${id}__board.jpg`;m.originalFile=`${date}__${id}__original.png`;m.metadataFile=`${date}__${id}.json`;
+        tx.objectStore('photos').add({id,metadata:m,composed:original.composed,original:original.original});
+      }
+      await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
+    });
+    await page.reload();await page.waitForFunction(()=>document.querySelector('#count').textContent==='5');
+    await page.getByRole('button',{name:/保存写真/}).click();
+    await page.waitForFunction(()=>document.querySelectorAll('.day-group').length===2);
+    assert.equal(await page.locator('.day-group').count(),2);
+    const day=saved.metadata.recordedDate, dayGroup=page.locator(`.day-group[data-day="${day}"]`);
+    assert.equal(await dayGroup.locator('.site-group').count(),3);
+    const siteGroup=dayGroup.locator('.site-group').filter({has:page.locator('summary').filter({hasText:'白上川 1K4R · 2枚'})});
+    if (!await siteGroup.evaluate(el=>el.open)) await siteGroup.locator(':scope > summary').click();
+    await siteGroup.locator(':scope > [data-archive]').click();
+    await page.waitForFunction(()=>!document.querySelector('#zip-save').disabled);
+    let zipDownloadPromise=page.waitForEvent('download');
+    await page.locator('#zip-save').click();
+    let zipDownload=await zipDownloadPromise;
+    await zipDownload.saveAs('test-results/site.zip');
+    assert.ok(zipDownload.suggestedFilename().includes('白上川1K4R'));
+    await dayGroup.locator(':scope > [data-archive]').click();
+    await page.waitForFunction(()=>!document.querySelector('#zip-save').disabled);
+    zipDownloadPromise=page.waitForEvent('download');await page.locator('#zip-save').click();zipDownload=await zipDownloadPromise;
+    await zipDownload.saveAs('test-results/day.zip');
+    assert.ok(zipDownload.suggestedFilename().includes('全地点'));
+    await page.screenshot({path:'test-results/grouped-library.png',fullPage:true});
+    const {spawnSync}=require('node:child_process');
+    const verify=spawnSync('python3',['-c',`import zipfile,json
+for path,count,sites in [('test-results/site.zip',2,1),('test-results/day.zip',4,3)]:
+ z=zipfile.ZipFile(path)
+ assert z.testzip() is None
+ m=json.loads(z.read('書き出し一覧.json'))
+ assert m['photoCount']==count
+ assert len(set(p['site'] for p in m['photos']))==sites
+ assert len(z.namelist())==count*3+1
+ for p in m['photos']:
+  assert p['composedPath'] in z.namelist() and p['originalPath'] in z.namelist()
+  assert json.loads(z.read(p['metadataPath']))['site']==p['site']
+ assert all(p['site']!='前日の地点' for p in m['photos'])
+print('Offline site/day ZIP contents verified')`],{encoding:'utf8'});
+    assert.equal(verify.status,0,verify.stderr);
+    assert.equal(await page.evaluate(async ()=>{
+      const db=await new Promise(resolve=>{const r=indexedDB.open('genba-photo',1);r.onsuccess=()=>resolve(r.result);});
+      return new Promise(resolve=>{const r=db.transaction('photos').objectStore('photos').count();r.onsuccess=()=>resolve(r.result);});
+    }),5,'export does not delete photos');
     assert.deepEqual(errors,[]);
-    console.log('PASS: import/original integrity, JSON export, offline/retry, full-screen scroll lock (4 viewports), board move/resize/edit/cancel, capture metadata and geometry, camera cleanup, permission denial');
+    console.log('PASS: import/original integrity, JSON export, offline/retry, full-screen camera, board editing, grouped library, offline site/day ZIP downloads and contents, source preservation');
     await context.close();
   } finally { await browser.close(); }
 })().catch(error => { console.error(error);process.exitCode=1; });

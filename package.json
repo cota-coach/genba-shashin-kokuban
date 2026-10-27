@@ -1,10 +1,10 @@
 {
   "name": "genba-shashin-kokuban",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "python3 -m http.server 8080 --bind 0.0.0.0",
-    "test": "node --test tests/core.test.js"
+    "test": "node --test tests/*.test.js"
   }
 }

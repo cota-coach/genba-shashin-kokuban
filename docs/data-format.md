@@ -20,6 +20,8 @@ YYYYMMDD__地点名__写真項目__端末ID__写真UUID.json
 
 v0.3.0では `boardX`, `boardY` を追加します。値が `null` または存在しない場合は従来の `position` の四隅を使用します。値がある場合は0〜1で、黒板の移動可能範囲に対する横・縦の相対位置です（0が左／上、1が右／下）。画像外へはみ出さず、映像の縦横比・保存サイズが変わっても同じ相対位置になります。`size` は画像幅に対する黒板幅の指定割合で、縦長さには画像内へ収まる上限を設けています。これらは画像の中の黒板位置であり、GPS位置ではありません。
 
+v0.4.0では `recordedDate`（`YYYYMMDD`）を追加し、撮影／取込操作時の端末ローカル日付を保存します。旧データの日別グループは `composedFile` の日付部分を使用し、判定できなければ「日付不明」とします。黒板の表示日時を手動変更しても、このグループの日付は変えません。
+
 `importedAt` と `savedAt` はUTCのISO8601文字列。`boardDate` はタイムゾーンを含まない黒板表示用のローカル日時文字列です。日時修正は `boardDate` のみを変えます。標準カメラ／画像取り込み時は `capturedAt: null`、`dateSource: device-import-time` です。
 
 v0.2.0では後方互換の追加フィールドとして `source`（`file-import` または `live-camera`）と `originalIsBrowserFrame` を記録します。旧記録では両フィールドがありません。ライブ撮影では `capturedAt` にシャッター操作時の端末時計をUTCで記録し、`dateSource: device-capture-time`、`originalIsBrowserFrame: true` です。ライブ撮影の原本は黒板合成前の動画フレームJPEGです。標準カメラのセンサー原本、EXIF由来の撮影時刻とは異なります。日時は第三者が検証済みだと解釈しないでください。
@@ -27,6 +29,14 @@ v0.2.0では後方互換の追加フィールドとして `source`（`file-impor
 管理情報はアプリ内IndexedDBと別ファイルのJSONに保持し、合成JPEGのEXIFへ埋め込んではいません。写真アプリの合成画像だけを取り出しても工種等の構造データは復元できません。PCへは画像とJSONをセットで渡してください。「保存写真」→「仕分け用データを確認」で既存保存写真も含めて確認できます。
 
 `width`, `height` はブラウザでデコードした画像の向きに対応するピクセル寸法。`originalName`, `originalType`, `originalFile`, `composedFile`, `metadataFile` を持ちます。
+
+## ZIP書き出し
+
+v0.4.0以降は日付／地点単位のZIPを生成できます。ZIP STORE形式（非再圧縮）、UTF-8ファイル名、各ファイルのCRC32を使用します。サーバー送信はありません。出力上限は250MiBです。
+
+`日付/地点名_識別用ID/` の直下に合成JPEG、`原本/` に原本、`管理情報/` に管理JSONを配置します。管理JSON内のファイル名は元のベース名のまま維持します。ZIPのルートに `書き出し一覧.json` を置き、`schemaVersion: 1`, `exportedAt`, `photoCount`, `photos` を記録します。各 `photos` 要素には `id`, `day`, `site`, `work`, `item`, `composedPath`, `originalPath`, `metadataPath`（ZIPルートからの相対パス）を持たせます。Python連携ではこの対応表も利用できます。
+
+写真のUUID・端末ID付きファイル名を維持するため、複数端末のZIPを同じ日付フォルダへ展開して統合できます。ただしWindowsの上書き確認が出たら自動上書きせず確認します。書き出し処理はアプリ内の写真を削除しません。書き出しの途中失敗でも、完全なZIPを作成できるまで保存ボタンを有効にしません。
 
 ## 将来のPython仕分け
 
