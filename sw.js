@@ -1,5 +1,5 @@
-const CACHE = 'genba-photo-v4';
-const ASSETS = ['./', './index.html', './style.css', './app.js', './core.js', './archive.js', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
+const CACHE = 'genba-photo-v5';
+const ASSETS = ['./', './index.html', './style.css', './app.js', './core.js', './archive.js', './jpeg-metadata.js', './photo-export.js', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS))));
 self.addEventListener('message', event => { if (event.data === 'SKIP_WAITING') self.skipWaiting(); });
 self.addEventListener('activate', event => event.waitUntil((async () => {

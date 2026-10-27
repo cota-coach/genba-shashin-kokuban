@@ -84,8 +84,10 @@ export async function makeZip(entries, {onProgress=()=>{}, maxBytes=MAX_ARCHIVE_
   e.setUint32(12,centralSize,true);e.setUint32(16,offset,true);
   return new Blob([...parts,...central,end.bytes],{type:'application/zip'});
 }
-export function archiveEntries(photos, exportedAt=new Date().toISOString()) {
-  const entries=[], manifest={schemaVersion:1,exportedAt,photoCount:photos.length,photos:[]}, usedFolders=new Map();
+export function archiveEntries(photos, exportedAt=new Date().toISOString(), selection={}) {
+  const included={composed:selection.composed!==false,original:selection.original!==false,json:selection.json!==false};
+  if (!Object.values(included).some(Boolean)) throw new Error('ZIPに入れるものを1つ以上選んでください。');
+  const entries=[], manifest={schemaVersion:1,exportedAt,included,photoCount:photos.length,photos:[]}, usedFolders=new Map();
   if (!photos.length) throw new Error('書き出す写真がありません。');
   for (const group of groupPhotos(photos)) for (const {site,photos:sitePhotos} of group.sites) {
     // Stable suffix keeps similarly sanitized names distinct across day/site exports.
@@ -100,11 +102,13 @@ export function archiveEntries(photos, exportedAt=new Date().toISOString()) {
         if (typeof name !== 'string' || name.includes('/') || name.includes('\\')) throw new Error('写真の管理ファイル名が不正です。');
       }
       const composedPath=`${root}/${m.composedFile}`, originalPath=`${root}/原本/${m.originalFile}`, metadataPath=`${root}/管理情報/${m.metadataFile}`;
-      entries.push({path:composedPath,blob:photo.composed,savedAt:m.savedAt},{path:originalPath,blob:photo.original,savedAt:m.savedAt},{path:metadataPath,blob:new Blob([JSON.stringify(m,null,2)],{type:'application/json'}),savedAt:m.savedAt});
-      manifest.photos.push({id:m.id,day:group.day,site:m.site,work:m.work,item:m.item,composedPath,originalPath,metadataPath});
+      if (included.composed) entries.push({path:composedPath,blob:photo.composed,savedAt:m.savedAt});
+      if (included.original) entries.push({path:originalPath,blob:photo.original,savedAt:m.savedAt});
+      if (included.json) entries.push({path:metadataPath,blob:new Blob([JSON.stringify(m,null,2)],{type:'application/json'}),savedAt:m.savedAt});
+      manifest.photos.push({id:m.id,day:group.day,site:m.site,work:m.work,item:m.item,composedPath:included.composed?composedPath:null,originalPath:included.original?originalPath:null,metadataPath:included.json?metadataPath:null});
     }
   }
-  entries.push({path:'書き出し一覧.json',blob:new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'})});
+  if (included.json) entries.push({path:'書き出し一覧.json',blob:new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'})});
   return entries;
 }
-export async function photoArchive(photos, options) { return makeZip(archiveEntries(photos),options); }
+export async function photoArchive(photos, options={}) { return makeZip(archiveEntries(photos,new Date().toISOString(),options.selection),options); }

@@ -26,7 +26,7 @@ v0.4.0では `recordedDate`（`YYYYMMDD`）を追加し、撮影／取込操作�
 
 v0.2.0では後方互換の追加フィールドとして `source`（`file-import` または `live-camera`）と `originalIsBrowserFrame` を記録します。旧記録では両フィールドがありません。ライブ撮影では `capturedAt` にシャッター操作時の端末時計をUTCで記録し、`dateSource: device-capture-time`、`originalIsBrowserFrame: true` です。ライブ撮影の原本は黒板合成前の動画フレームJPEGです。標準カメラのセンサー原本、EXIF由来の撮影時刻とは異なります。日時は第三者が検証済みだと解釈しないでください。
 
-管理情報はアプリ内IndexedDBと別ファイルのJSONに保持し、合成JPEGのEXIFへ埋め込んではいません。写真アプリの合成画像だけを取り出しても工種等の構造データは復元できません。PCへは画像とJSONをセットで渡してください。「保存写真」→「仕分け用データを確認」で既存保存写真も含めて確認できます。
+v0.4.0までは管理情報をアプリ内IndexedDBと別ファイルのJSONに保持していました。v0.5.0以降は書き出す合成JPEGのEXIFにも埋め込み、画像単体から読み取れます。旧保存写真は書き出すコピーで対応します。「保存写真」→「仕分け用データを確認」で既存保存写真も含めて確認できます。
 
 `width`, `height` はブラウザでデコードした画像の向きに対応するピクセル寸法。`originalName`, `originalType`, `originalFile`, `composedFile`, `metadataFile` を持ちます。
 
@@ -43,3 +43,19 @@ v0.4.0以降は日付／地点単位のZIPを生成できます。ZIP STORE形�
 画像認識や黒板OCRは不要です。JSONまたはファイル名から分類し、まずコピーと事前確認一覧の方式で実装します。未知の仕様、不正なパス、欠損、重複、名前衝突は確認待ちへ分け、元写真を削除しません。写真アプリを経由するとファイル名が変わる場合があるため、PCへの受け渡しはファイル書き出しを基本とします。
 
 Excel側は、実帳票の写真枠・シート名・既存VBAを調査してから対応表を決めます。この試作ではExcelを変更しません。
+
+## EXIF埋め込み v1（アプリv0.5.0以降）
+
+`embeddedExifVersion: 1` を持ちます。Exif IFDのUserComment（0x9286、UNDEFINED型）へ8バイトの `ASCII\0\0\0` に続けて、ASCIIへUnicodeエスケープしたJSONを格納します。構造は `{application: "genba-photo", embeddedSchemaVersion: 1, metadata: {...}}` です。管理情報はJSONサイドカーと同じ意味を持ちます。
+
+IFD0のXPTitle（0x9c9b）、XPSubject（0x9c9f）、XPComment（0x9c9c）、XPKeywords（0x9c9e）はUTF-16LE・末尾NULのBYTE列で、日本語に対応します。IFD0のDateTimeは合成写真の保存日時、DateTimeOriginal（0x9003）は取得済みのライブ撮影日時のみ、OffsetTimeOriginal（0x9011）とSubSecTimeOriginal（0x9291）を併記します。元の撮影日時を取得していない取込写真にDateTimeOriginalを捏造しません。`timeZoneOffsetMinutes` と `captureTimeZoneOffsetMinutes` はJavaScriptのgetTimezoneOffset形式（日本は-540）です。
+
+`gps` は未取得時null、取得時は `latitude`, `longitude`, `accuracy`（m）, `recordedAt`（UTC ISO8601）、任意の `altitude`（m）です。`gpsStatus` は `off`, `recorded`, `denied`, `timeout`, `unsupported`, `unavailable`, `invalid`, `not-collected-import`。撮影直後に最大8秒取得を試みるため、座標の取得時刻とシャッター時刻は異なる場合があります。過去写真の地点座標だと解釈しません。
+
+GPS IFDは取得できた場合のみ作成し、Latitude/Longitudeと参照方位、任意のAltitude、測位精度（GPSHPositioningError）、取得UTC時刻を標準タグへ記録します。GPSオフの新規合成JPEGにGPS IFDは作りません。地点名はGPSとは別項目で常に記録します。
+
+JPEGへはAPP1 Exifセグメントを挿入・置換し、画像の圧縮データや他のAPPセグメントは保持します。原本には実行しません。`tools/read_photo_metadata.py` でJPEG単体から管理情報を読み出せます。
+
+## ZIPの内容選択（v0.5.0）
+
+黒板付きJPEG、原本、管理JSONを独立して選びます。JSONを選んだ場合だけサイドカーと書き出し一覧を格納します。全部オフはエラーです。書き出し一覧には `included: {composed, original, json}` を加え、入れない種類のパスはnullとします。JSONなしの場合、ZIPにはJSONファイルが一切入りません。ZIP内のJPEGにも管理情報が埋め込まれます。

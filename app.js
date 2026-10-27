@@ -1,5 +1,7 @@
 import {fileStem, safeName, localDate, boardRect, displayDate} from './core.js';
 import {groupPhotos, dayLabel, photoArchive} from './archive.js';
+import {embedJpegMetadata,readJpegMetadata,validGPS} from './jpeg-metadata.js';
+import {exportPhoto} from './photo-export.js';
 
 const $ = id => document.getElementById(id);
 let db, settings, current, busy = false;
@@ -7,7 +9,7 @@ let cameraStream = null, cameraOpening = false, cameraRequest = 0, clockTimer = 
 let boardPlacement = {x:null, y:null}, cameraScrollY = 0, settingsWrites = Promise.resolve();
 let galleryURLs = [];
 let archiveBusy = false, preparedArchive = null;
-const defaults = () => ({sites: [], items: ['全景', '盤面', 'センサー部', '基礎・杭', 'その他'], deviceId: crypto.randomUUID().slice(0, 8), work: '', theme: 'green', position: 'bottom-left', size: '40', dateMode: 'date'});
+const defaults = () => ({sites: [], items: ['全景', '盤面', 'センサー部', '基礎・杭', 'その他'], deviceId: crypto.randomUUID().slice(0, 8), work: '', theme: 'green', position: 'bottom-left', size: '40', dateMode: 'date',gpsEnabled:false,exportSelection:{composed:true,original:true,json:true}});
 function status(message, error = false) {
   for (const id of ['status','camera-status']) { $(id).textContent = message; $(id).classList.toggle('error', error); }
 }
@@ -182,7 +184,7 @@ function renderLiveBoard() {
   const hit = $('board-edit-hit');
   hit.style.left = `${rect.x / width * 100}%`; hit.style.top = `${rect.y / height * 100}%`;
   hit.style.width = `${rect.w / width * 100}%`; hit.style.height = `${rect.h / height * 100}%`;
-  $('camera-resolution').textContent = `${video.videoWidth} × ${video.videoHeight}px · ライブ撮影`;
+  $('camera-resolution').textContent = `${video.videoWidth} × ${video.videoHeight}px · ライブ撮影 · GPS ${settings.gpsEnabled?'ON':'OFF'}`;
   $('capture').disabled = busy || $('board-editor').open;
 }
 function stopCamera() {
@@ -235,12 +237,31 @@ async function captureLive() {
     canvas.getContext('2d').drawImage(video, 0, 0);
     const blob = await new Promise((resolve,reject) => canvas.toBlob(b => b ? resolve(b) : reject(new Error('撮影画像を作成できませんでした。')), 'image/jpeg', 0.95));
     const file = new File([blob], 'live-camera.jpg', {type:'image/jpeg'});
-    await setPhoto(file, now, 'live-camera');
+    const location=settings.gpsEnabled ? await locateAtCapture() : {gps:null,gpsStatus:'off'};
+    await setPhoto(file, now, 'live-camera',location);
     stopCamera();
-    status(`${canvas.width} × ${canvas.height}pxで撮影しました。黒板を確認し「黒板を合成して端末内に保存」を押してください。`);
+    status(`${canvas.width} × ${canvas.height}pxで撮影しました。${settings.gpsEnabled ? location.gps ? 'GPS座標も取得しました。' : 'GPSは取得できませんでした。位置情報なしで保存できます。' : ''}黒板を確認し「黒板を合成して端末内に保存」を押してください。`);
   } finally { busy = false; render(); }
 }
-async function setPhoto(file, now, source) {
+async function locateAtCapture() {
+  if (!navigator.geolocation) return {gps:null,gpsStatus:'unsupported'};
+  status('撮影済み画像の現在地を取得中…取得できない場合はGPSなしで続けます。');
+  return new Promise(resolve=>{
+    let settled=false;
+    const finish=value=>{if (settled) return;settled=true;clearTimeout(timer);resolve(value);};
+    const timer=setTimeout(()=>finish({gps:null,gpsStatus:'timeout'}),9000);
+    try {
+      navigator.geolocation.getCurrentPosition(position=>{
+        try {
+          const c=position.coords,gps={latitude:c.latitude,longitude:c.longitude,accuracy:c.accuracy,recordedAt:new Date(position.timestamp).toISOString()};
+          if (Number.isFinite(c.altitude)) gps.altitude=c.altitude;
+          finish(validGPS(gps) ? {gps,gpsStatus:'recorded'} : {gps:null,gpsStatus:'invalid'});
+        } catch {finish({gps:null,gpsStatus:'invalid'});}
+      },error=>finish({gps:null,gpsStatus:error.code===1?'denied':error.code===3?'timeout':'unavailable'}),{enableHighAccuracy:true,timeout:8000,maximumAge:0});
+    } catch {finish({gps:null,gpsStatus:'unavailable'});}
+  });
+}
+async function setPhoto(file, now, source,location={gps:null,gpsStatus:'not-collected-import'}) {
   const url = URL.createObjectURL(file);
   try {
     const image = new Image(); image.src = url;
@@ -249,7 +270,7 @@ async function setPhoto(file, now, source) {
     if (width * height > 25000000) throw new Error('試作版では合成対象は2500万画素までです。カメラの設定を12MP程度にして再撮影してください。');
     if (!width || !height) throw new Error('画像サイズを取得できません。');
     if (current) URL.revokeObjectURL(current.url);
-    current = {file, image, url, selectedAt: localInputDate(now), importedAt: now.toISOString(), date: localDate(now), source, capturedAt: source === 'live-camera' ? now.toISOString() : null};
+    current = {file, image, url, selectedAt: localInputDate(now), importedAt: now.toISOString(), date: localDate(now), source, capturedAt: source === 'live-camera' ? now.toISOString() : null,timeZoneOffsetMinutes:now.getTimezoneOffset(),...location};
     $('preview').width = width; $('preview').height = height; $('preview').hidden = false; $('placeholder').hidden = true;
   } catch (error) { URL.revokeObjectURL(url); throw error; }
 }
@@ -273,11 +294,13 @@ async function savePhoto() {
   busy = true; render(); status('原本・合成写真・管理情報を端末内に保存中…');
   try {
     render();
-    const composed = await new Promise((resolve, reject) => $('preview').toBlob(blob => blob ? resolve(blob) : reject(new Error('画像合成に失敗しました。')), 'image/jpeg', 0.95));
+    const image = await new Promise((resolve, reject) => $('preview').toBlob(blob => blob ? resolve(blob) : reject(new Error('画像合成に失敗しました。')), 'image/jpeg', 0.95));
     const id = crypto.randomUUID(), stem = fileStem({date: current.date, site: meta.site, item: meta.item, deviceId: settings.deviceId, id});
     const ext = current.file.name.split('.').pop()?.toLowerCase();
     const originalExtension = /^[a-z0-9]{1,8}$/.test(ext) ? ext : 'bin';
     const metadata = {schemaVersion: 1, id, deviceId: settings.deviceId, ...meta, recordedDate:current.date, importedAt: current.importedAt, savedAt: new Date().toISOString(), capturedAt: current.capturedAt, dateSource: current.source === 'live-camera' ? 'device-capture-time' : 'device-import-time', source: current.source, originalIsBrowserFrame: current.source === 'live-camera', originalName: current.file.name, originalType: current.file.type, width: $('preview').width, height: $('preview').height, originalFile: `${stem}__original.${originalExtension}`, composedFile: `${stem}__board.jpg`, metadataFile: `${stem}.json`};
+    Object.assign(metadata,{embeddedExifVersion:1,timeZoneOffsetMinutes:new Date().getTimezoneOffset(),captureTimeZoneOffsetMinutes:current.timeZoneOffsetMinutes,gps:current.gps,gpsStatus:current.gpsStatus});
+    const composed=await embedJpegMetadata(image,metadata);
     await transaction('photos', 'readwrite', store => store.add({id, metadata, original: current.file, composed}));
     clearArchive();
     URL.revokeObjectURL(current.url); current = null; $('preview').hidden = true; $('placeholder').hidden = false;
@@ -287,7 +310,8 @@ async function savePhoto() {
 function download(blob, name) {
   const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
-function filesFor(photo) {
+async function filesFor(storedPhoto) {
+  const photo=await exportPhoto(storedPhoto);
   const m = photo.metadata;
   return [new File([photo.composed], m.composedFile, {type: 'image/jpeg'}), new File([photo.original], m.originalFile, {type: m.originalType || 'application/octet-stream'}), new File([JSON.stringify(m, null, 2)], m.metadataFile, {type: 'application/json'})];
 }
@@ -304,13 +328,18 @@ async function prepareArchive(photos, day, site = null) {
   if (archiveBusy) return;
   archiveBusy = true; preparedArchive = null; render();
   $('zip-panel').hidden = false; $('zip-save').disabled = true; $('zip-share').disabled = true;
+  $('zip-options').disabled=true;
   $('zip-filename').textContent = '';
   const scope = `${dayLabel(day)}${site === null ? '・全地点' : `・${site}`}`;
   $('zip-message').textContent = `${scope} ${photos.length}枚をZIPにまとめています…`;
   for (const button of document.querySelectorAll('[data-archive],[data-delete-photo]')) button.disabled = true;
   $('zip-panel').scrollIntoView({behavior:'smooth',block:'start'});
   try {
-    const zip = await photoArchive(photos,{onProgress:(done,total) => { $('zip-message').textContent = `${scope} ${photos.length}枚・準備中 ${done}/${total}`; }});
+    const selection=zipSelection();
+    if (!Object.values(selection).some(Boolean)) throw new Error('ZIPに入れるものを1つ以上選んでください。');
+    const selected=[];
+    for (const photo of photos) selected.push(selection.composed ? await exportPhoto(photo) : photo);
+    const zip = await photoArchive(selected,{selection,onProgress:(done,total) => { $('zip-message').textContent = `${scope} ${photos.length}枚・準備中 ${done}/${total}`; }});
     const name = `現場写真_${day}_${site === null ? '全地点' : safeName(site)}_${settings.deviceId}_${crypto.randomUUID().slice(0,8)}.zip`;
     preparedArchive = new File([zip],name,{type:'application/zip'});
     $('zip-filename').textContent = `${name}（${(zip.size/1024/1024).toFixed(1)}MB）`;
@@ -319,7 +348,7 @@ async function prepareArchive(photos, day, site = null) {
     status('ZIPの準備ができました。ファイルへ保存してPCに渡せます。');
   } catch (error) { $('zip-message').textContent = `書き出せませんでした。${error.message} 写真はアプリ内に残っています。`; throw error; }
   finally {
-    archiveBusy = false; render();
+    archiveBusy = false; $('zip-options').disabled=false; render();
     for (const button of document.querySelectorAll('[data-archive],[data-delete-photo]')) button.disabled = false;
   }
 }
@@ -361,14 +390,26 @@ function photoCard(photo) {
     for (const [label,value] of [['地点',m.site],['工種',m.work || '未設定'],['写真項目',m.item],['撮影日時',dateText(m.capturedAt)],['取込日時',dateText(m.importedAt)],['黒板表示日時',m.boardDate || '未設定'],['日時表示',m.dateMode === 'none' ? '表示なし' : m.dateMode === 'date' ? '年月日' : '年月日＋時分'],['画像寸法',`${m.width} × ${m.height}px`],['撮影方式',m.source === 'live-camera' ? 'ライブ映像からの撮影' : '標準カメラ・画像取り込み'],['端末ID',m.deviceId]]) {
       const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = value; list.append(dt,dd);
     }
-    const note = document.createElement('p'); note.className = 'note'; note.textContent = 'この情報はアプリ内と管理JSONに保存しています。写真アプリの画像だけでは、工種等のデータは取り出せません。PCへは画像とJSONをセットで渡してください。日時は端末時計による記録です。';
+    const gpsLabel=document.createElement('dt'),gpsValue=document.createElement('dd');gpsLabel.textContent='GPS座標';gpsValue.textContent=m.gps ? `${m.gps.latitude}, ${m.gps.longitude}（精度 ${m.gps.accuracy}m）` : '未記録';list.append(gpsLabel,gpsValue);
+    const note = document.createElement('p'); note.className = 'note'; note.textContent = '書き出す黒板付きJPEGにも地点・工種・項目・日時を埋め込みます。「JPEG内のデータを確認」で画像ファイル内から読み出せます。日時は端末時計による記録です。元写真の撮影時刻が未取得の場合は、取込日時と区別します。';
     const raw = document.createElement('pre'); raw.className = 'metadata-json'; raw.textContent = JSON.stringify(m, null, 2);
     info.append(summary,list,note,raw);
     const buttons = document.createElement('div'); buttons.className = 'buttons';
     const add = (label, action) => { const b = document.createElement('button'); b.textContent = label; b.onclick = run(action); buttons.append(b); };
-    const files = filesFor(photo);
-    add('合成写真を共有', () => share([files[0]])); add('一式を共有', () => share(files));
-    for (const [i,label] of ['合成JPEGを保存', '原本を保存', '管理JSONを保存'].entries()) add(label, () => download(files[i], files[i].name));
+    const embedded=document.createElement('p');embedded.className='note';
+    const verify=document.createElement('button');verify.textContent='JPEG内のデータを確認';
+    verify.onclick=run(async()=>{
+      const exported=await exportPhoto(photo),data=await readJpegMetadata(exported.composed);
+      if (!data) throw new Error('JPEG内に管理情報が見つかりません。');
+      embedded.textContent=`JPEG内から読み取り成功：地点「${data.site}」／工種「${data.work || '未設定'}」／項目「${data.item}」。GPS：${data.gps ? `${data.gps.latitude}, ${data.gps.longitude}（精度${data.gps.accuracy}m）` : '未記録'}。`;
+      raw.textContent=JSON.stringify(data,null,2);info.open=true;
+    });
+    info.insertBefore(verify,raw);info.insertBefore(embedded,raw);
+    add('合成写真を共有',async()=>share([(await filesFor(photo))[0]]));add('一式を共有',async()=>share(await filesFor(photo)));
+    for (const [i,label] of ['合成JPEGを保存', '原本を保存', '管理JSONを保存'].entries()) add(label,async()=>{
+      if (i===1) {download(photo.original,photo.metadata.originalFile);return;}
+      const files=await filesFor(photo);download(files[i],files[i].name);
+    });
     const deleteButton=document.createElement('button');deleteButton.textContent='端末内から削除';deleteButton.dataset.deletePhoto='';deleteButton.disabled=archiveBusy;
     deleteButton.onclick=run(async () => {
       if (archiveBusy) return;
@@ -377,7 +418,11 @@ function photoCard(photo) {
       clearArchive();
     });
     buttons.append(deleteButton);
-    card.append(title, img, name, info, buttons); return card;
+    card.append(title, img, name, info,buttons); return card;
+}
+function zipSelection() { return {composed:$('zip-include-composed').checked,original:$('zip-include-original').checked,json:$('zip-include-json').checked}; }
+function queueSettingsPatch(patch) {
+  settingsWrites=settingsWrites.catch(()=>{}).then(()=>updateSettings({...settings,...patch}));return settingsWrites;
 }
 async function init() {
   db = await new Promise((resolve, reject) => {
@@ -386,6 +431,8 @@ async function init() {
     req.onsuccess = () => resolve(req.result); req.onerror = () => reject(new Error('端末内保存が使えません。プライベートブラウズや保存設定を確認してください。'));
   });
   settings = await read('settings', 'main') || defaults(); await writeSettings(settings);
+  $('gps-enabled').checked=!!settings.gpsEnabled;
+  for (const key of ['composed','original','json']) $(`zip-include-${key}`).checked=settings.exportSelection?.[key]!==false;
   boardPlacement = {x:settings.boardX ?? null,y:settings.boardY ?? null};
   fillSites(); fillItems(); $('device').textContent = settings.deviceId;
   for (const [id,key] of [['work','work'],['theme','theme'],['position','position'],['size','size'],['date-mode','dateMode']]) $(id).value = settings[key];
@@ -412,6 +459,12 @@ async function init() {
     await saveCaptureSettings();
   }));
   $('camera').onchange = run(loadPhoto); $('import').onchange = run(loadPhoto); $('save').onclick = run(savePhoto);
+  $('gps-enabled').onchange=run(async()=>{await queueSettingsPatch({gpsEnabled:$('gps-enabled').checked});status(settings.gpsEnabled?'次のライブ撮影でGPS取得を試みます。座標はJPEGにも入り、共有先へ渡ります。':'次の撮影からGPSを記録しません。保存済み写真のGPSは変わりません。');});
+  for (const key of ['composed','original','json']) $(`zip-include-${key}`).onchange=run(async()=>{
+    preparedArchive=null;$('zip-save').disabled=true;$('zip-share').disabled=true;$('zip-filename').textContent='';
+    if (!$('zip-panel').hidden) $('zip-message').textContent='内容を変更しました。地点／日付のZIP作成ボタンを押してください。';
+    await queueSettingsPatch({exportSelection:zipSelection()});
+  });
   $('zip-save').onclick = () => { if (preparedArchive) { download(preparedArchive,preparedArchive.name); status('ZIPの保存を開始しました。保存先で開けることを確認してください。'); } };
   $('zip-share').onclick = run(async () => {
     if (!preparedArchive) return;

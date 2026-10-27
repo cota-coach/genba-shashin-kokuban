@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 (async () => {
   const browser = await chromium.launch({executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', args:['--no-sandbox', '--use-fake-device-for-media-stream']});
   try {
-    const context = await browser.newContext({viewport:{width:390,height:844}, acceptDownloads:true, permissions:['camera'], isMobile:true, hasTouch:true});
+    const context = await browser.newContext({viewport:{width:390,height:844}, acceptDownloads:true, permissions:['camera','geolocation'],geolocation:{latitude:35.681236,longitude:139.767125,accuracy:7.5}, isMobile:true, hasTouch:true});
     const page = await context.newPage();
     const touch = await context.newCDPSession(page);
     const errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -50,6 +50,8 @@ const fs = require('node:fs/promises');
     await page.getByRole('button',{name:/保存写真/}).click();
     await page.getByText('仕分け用データを確認', {exact:true}).click();
     assert.ok((await page.locator('.metadata-list').textContent()).includes('水位計 定期点検'));
+    await page.getByRole('button',{name:'JPEG内のデータを確認',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('.photo').textContent.includes('JPEG内から読み取り成功'));
     const jsonPromise = page.waitForEvent('download');
     await page.getByRole('button',{name:'管理JSONを保存',exact:true}).click();
     const jsonDownload = await jsonPromise;
@@ -78,6 +80,11 @@ const fs = require('node:fs/promises');
     await page.evaluate(() => { IDBObjectStore.prototype.add = window.realAdd; });
     await page.locator('#save').click();
     await page.waitForFunction(() => document.querySelector('#count').textContent === '2');
+
+    await page.getByRole('button',{name:'地点・設定',exact:true}).click();
+    await page.locator('#gps-enabled').check();
+    await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('次のライブ撮影'));
+    await page.getByRole('button',{name:'撮影',exact:true}).click();
 
     // Live camera uses a synthetic device, without uploading any frames.
     await page.locator('#theme').selectOption('white');
@@ -154,6 +161,8 @@ const fs = require('node:fs/promises');
     assert.equal(live.metadata.width, overlay.width);assert.equal(live.metadata.height, overlay.height);
     assert.equal(live.metadata.boardX,0.96);assert.equal(live.metadata.boardY,0.04);
     assert.equal(live.metadata.size,45);assert.equal(live.metadata.work,'定期点検（現場で変更）');
+    assert.equal(live.metadata.gps.latitude,35.681236);assert.equal(live.metadata.gps.longitude,139.767125);
+    assert.equal(live.metadata.gpsStatus,'recorded');
     assert.equal(live.metadata.item,'センサー部');assert.equal(live.metadata.site,'白上川 1K4R 確認');
     assert.equal(live.oldSite,'白上川 1K4R','renaming the site does not change old saved records');
     assert.notDeepEqual(live.pixels[0],live.pixels[1], 'original has no composited board');
@@ -167,7 +176,7 @@ const fs = require('node:fs/promises');
     await page.getByRole('button',{name:/保存写真/}).click();
     assert.equal(await page.locator('#live-video').evaluate(video => video.srcObject),null,'closing camera stops stream');
     await page.getByRole('button',{name:'撮影',exact:true}).click();
-    await page.evaluate(() => { navigator.mediaDevices.getUserMedia=async () => { throw new DOMException('denied','NotAllowedError'); }; });
+    await page.evaluate(() => { window.realGetUserMedia=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);navigator.mediaDevices.getUserMedia=async () => { throw new DOMException('denied','NotAllowedError'); }; });
     await page.locator('#start-camera').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('許可されませんでした'));
     assert.equal(await page.locator('#start-camera').isEnabled(),true);
@@ -182,6 +191,7 @@ const fs = require('node:fs/promises');
       const tx=db.transaction('photos','readwrite');
       for (const [id,site,date] of [['zip-site','別地点',day],['zip-old','前日の地点','20261026']]) {
         const m={...original.metadata,id,site,recordedDate:date};
+        delete m.embeddedExifVersion; // Legacy photos must be upgraded on export.
         m.composedFile=`${date}__${id}__board.jpg`;m.originalFile=`${date}__${id}__original.png`;m.metadataFile=`${date}__${id}.json`;
         tx.objectStore('photos').add({id,metadata:m,composed:original.composed,original:original.original});
       }
@@ -223,12 +233,45 @@ for path,count,sites in [('test-results/site.zip',2,1),('test-results/day.zip',4
  assert all(p['site']!='前日の地点' for p in m['photos'])
 print('Offline site/day ZIP contents verified')`],{encoding:'utf8'});
     assert.equal(verify.status,0,verify.stderr);
+    await page.locator('#zip-include-original').uncheck();await page.locator('#zip-include-json').uncheck();
+    assert.equal(await page.locator('#zip-save').isDisabled(),true,'changing options invalidates the prepared ZIP');
+    await dayGroup.locator(':scope > [data-archive]').click();
+    await page.waitForFunction(()=>!document.querySelector('#zip-save').disabled);
+    zipDownloadPromise=page.waitForEvent('download');await page.locator('#zip-save').click();zipDownload=await zipDownloadPromise;
+    await zipDownload.saveAs('test-results/images-only.zip');
+    const imageCheck=spawnSync('python3',['-c',`import zipfile,json,tempfile,pathlib,subprocess,sys
+z=zipfile.ZipFile('test-results/images-only.zip')
+assert z.testzip() is None
+assert len(z.namelist())==4
+assert all(n.endswith('__board.jpg') and '/原本/' not in n for n in z.namelist())
+sites=[]
+with tempfile.TemporaryDirectory() as d:
+ for n in z.namelist():
+  p=pathlib.Path(d)/'photo.jpg';p.write_bytes(z.read(n))
+  r=subprocess.run([sys.executable,'tools/read_photo_metadata.py',str(p),'--json'],capture_output=True,text=True,check=True)
+  m=json.loads(r.stdout);sites.append(m['site']);assert m['work']
+assert len(set(sites))==3
+print('JPEG-only ZIP has no JSON or originals, and every JPEG independently contains its metadata')`],{encoding:'utf8'});
+    assert.equal(imageCheck.status,0,imageCheck.stderr);
+    await page.locator('#zip-include-composed').uncheck();
+    await dayGroup.locator(':scope > [data-archive]').click();
+    await page.waitForFunction(()=>document.querySelector('#zip-message').textContent.includes('1つ以上'));
+    assert.equal(await page.locator('#zip-save').isDisabled(),true);
     assert.equal(await page.evaluate(async ()=>{
       const db=await new Promise(resolve=>{const r=indexedDB.open('genba-photo',1);r.onsuccess=()=>resolve(r.result);});
       return new Promise(resolve=>{const r=db.transaction('photos').objectStore('photos').count();r.onsuccess=()=>resolve(r.result);});
     }),5,'export does not delete photos');
+    // GPS permission failure must keep the captured photo usable.
+    await page.reload();await page.waitForFunction(()=>document.querySelector('#count').textContent==='5');
+    await page.evaluate(()=>{
+      navigator.geolocation.getCurrentPosition=(_success,failure)=>failure({code:1});
+    });
+    await page.locator('#start-camera').click();await page.waitForFunction(()=>!document.querySelector('#capture').disabled);
+    await page.locator('#capture').click();await page.waitForFunction(()=>!document.querySelector('#save').disabled);
+    assert.ok((await page.locator('#status').textContent()).includes('GPSは取得できませんでした'));
+    await page.locator('#save').click();await page.waitForFunction(()=>document.querySelector('#count').textContent==='6');
     assert.deepEqual(errors,[]);
-    console.log('PASS: import/original integrity, JSON export, offline/retry, full-screen camera, board editing, grouped library, offline site/day ZIP downloads and contents, source preservation');
+    console.log('PASS: JPEG embedded metadata, legacy export upgrade, ZIP selections/no JSON, GPS success/denial, original preservation, offline camera and exports');
     await context.close();
   } finally { await browser.close(); }
 })().catch(error => { console.error(error);process.exitCode=1; });

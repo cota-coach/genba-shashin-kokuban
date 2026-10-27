@@ -54,3 +54,13 @@ test('ZIP refuses unsafe/duplicate paths, missing photos and oversized output',a
   await assert.rejects(photoArchive([{...photo('x'),original:null}]),/見つかりません/);
   const bad=photo('x');bad.metadata.originalFile='../escape.jpg';assert.throws(()=>archiveEntries([bad]),/不正/);
 });
+test('all seven ZIP selections include exactly the selected file types',async()=>{
+  for (let mask=1;mask<8;mask++) {
+    const selection={composed:!!(mask&1),original:!!(mask&2),json:!!(mask&4)},entries=archiveEntries([photo('selection')],undefined,selection);
+    assert.equal(entries.filter(e=>e.path.endsWith('__board.jpg')).length,selection.composed?1:0);
+    assert.equal(entries.filter(e=>e.path.includes('/原本/')).length,selection.original?1:0);
+    assert.equal(entries.filter(e=>e.path.endsWith('.json')).length,selection.json?2:0);
+    const zip=await photoArchive([photo('selection')],{selection});assert.ok(zip.size>22);
+  }
+  await assert.rejects(photoArchive([photo('empty')],{selection:{composed:false,original:false,json:false}}),/1つ以上/);
+});
