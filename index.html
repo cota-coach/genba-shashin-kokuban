@@ -14,18 +14,22 @@
   <title>現場写真｜電子黒板</title>
 </head>
 <body>
-  <header><div><span class="eyebrow">GENBA PHOTO · 試作版</span><h1>現場写真 <small>電子黒板</small></h1></div><span class="local">端末内処理</span></header>
+  <header><div><span class="eyebrow">GENBA PHOTO · v0.2.0</span><h1>現場写真 <small>電子黒板</small></h1></div><span class="local">端末内処理</span></header>
   <main>
     <nav aria-label="画面"><button class="tab active" data-page="shoot" aria-pressed="true">撮影</button><button class="tab" data-page="library" aria-pressed="false">保存写真 <span id="count">0</span></button><button class="tab" data-page="settings" aria-pressed="false">地点・設定</button></nav>
     <p id="status" role="status" aria-live="polite">写真は外部サーバーへ送信しません。</p>
+    <button id="update-app" hidden>新しい版に更新する（保存データは残ります）</button>
     <section id="shoot" class="page">
       <div class="card selection"><label>撮影地点<select id="site"></select></label><p id="no-sites" hidden>「地点・設定」から、最初の地点を登録してください。</p><label>工種<input id="work" maxlength="80" placeholder="例：水位計 定期点検"></label><label>写真項目<input id="item" maxlength="60" value="全景"></label><div id="item-buttons" class="chips"></div></div>
-      <div class="preview"><canvas id="preview" hidden></canvas><div id="placeholder"><span>＋</span><p>撮影するか、写真を取り込む</p><small>原本を残して黒板を合成します</small></div></div>
+      <button id="start-camera" class="wide">黒板を見ながらカメラを起動</button>
+      <p class="note">ライブ撮影は映像の解像度で保存します。画質を優先する場合は下の「標準カメラ」を使ってください。</p>
+      <div class="preview" id="viewfinder"><div id="live-view" hidden><video id="live-video" autoplay muted playsinline aria-label="撮影中のカメラ映像"></video><canvas id="live-board" aria-label="黒板の位置プレビュー"></canvas></div><canvas id="preview" hidden></canvas><div id="placeholder"><span>＋</span><p>撮影するか、写真を取り込む</p><small>黒板なし画像と合成写真を別に保存します</small></div></div>
+      <div id="live-controls" class="camera-controls" hidden><p id="camera-resolution" class="note"></p><div class="grid"><button id="capture" disabled>この位置で撮影</button><button id="stop-camera" class="secondary">カメラを閉じる</button></div></div>
       <details class="card" open><summary>黒板の見た目・日時</summary><div class="grid"><label>デザイン<select id="theme"><option value="green">緑の黒板</option><option value="white">ホワイトボード</option></select></label><label>位置<select id="position"><option value="bottom-left">左下</option><option value="bottom-right">右下</option><option value="top-left">左上</option><option value="top-right">右上</option></select></label></div><label>大きさ <output id="size-label">40%</output><input id="size" type="range" min="25" max="65" value="40"></label><label>日時表示<select id="date-mode"><option value="date">年月日</option><option value="datetime">年月日＋時分</option><option value="none">表示しない</option></select></label><label>黒板に表示する日時（任意）<input id="manual-date" type="datetime-local"></label><small>空欄なら撮影・取込操作時の端末日時。原本のEXIF日時は読み取りません。</small></details>
-      <div class="actions"><label class="button primary" for="camera">カメラで撮影<input id="camera" type="file" accept="image/*" capture="environment"></label><label class="button secondary" for="import">写真を選ぶ<input id="import" type="file" accept="image/*"></label><button id="save" disabled>黒板を合成して端末内に保存</button></div>
+      <div class="actions"><label class="button primary" for="camera">標準カメラで撮影<input id="camera" type="file" accept="image/*" capture="environment"></label><label class="button secondary" for="import">写真を選ぶ<input id="import" type="file" accept="image/*"></label><button id="save" disabled>黒板を合成して端末内に保存</button></div>
       <p class="note">保存先はこのブラウザ内です。「保存写真」から共有・書き出ししてバックアップしてください。原本と合成写真は別に保持します。</p>
     </section>
-    <section id="library" class="page" hidden><h2>保存写真</h2><p class="note">「合成写真を共有」→ 対応するスマホで「画像を保存」を選ぶと、写真アプリへ保存できます。「一式を共有」では原本・合成JPEG・管理JSONを渡します。</p><div id="photos"></div></section>
+    <section id="library" class="page" hidden><h2>保存写真</h2><p class="note">「合成写真を共有」→ 対応するスマホで「画像を保存」を選ぶと、写真アプリへ保存できます。地点・工種等は画像内に埋め込まず、管理JSONに記録します。AIなしでPC仕分けするために、「一式を共有」で画像と管理JSONを同じ場所へ保存してください。写真アプリ経由ではファイル名が変わることがあります。</p><div id="photos"></div></section>
     <section id="settings" class="page" hidden><div class="card"><h2>地点を登録</h2><form id="site-form"><label>地点名<input id="new-site" maxlength="60" placeholder="例：白上川 1K4R" required></label><button>追加する</button></form><ul id="site-list"></ul></div><div class="card"><h2>よく使う写真項目</h2><label>1行に1項目<textarea id="items" rows="5" maxlength="1000"></textarea></label><button id="update-items">項目を保存</button></div><div class="card"><h2>保存について</h2><p>端末識別子：<code id="device"></code></p><p>ブラウザのデータを消すと、写真・地点設定も消えます。ホーム画面版とブラウザ版で保存領域が異なる場合もあります。</p><button id="persist">端末内データの保持をリクエスト</button><p>初回は通信が必要です。オフラインの準備状況：<strong id="offline">確認中</strong></p><p>ホーム画面へ追加：iPhoneはSafariの共有メニュー、Androidはブラウザのインストールメニューを使用します。HTTPSの配布URLが必要です。</p></div></section>
   </main>
   <script type="module" src="app.js"></script>

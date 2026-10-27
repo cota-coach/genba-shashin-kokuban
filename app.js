@@ -2,6 +2,7 @@ import {fileStem, localDate, boardRect, displayDate} from './core.js';
 
 const $ = id => document.getElementById(id);
 let db, settings, current, busy = false;
+let cameraStream = null, cameraOpening = false, cameraRequest = 0, clockTimer = null;
 let galleryURLs = [];
 const defaults = () => ({sites: [], items: ['全景', '盤面', 'センサー部', '基礎・杭', 'その他'], deviceId: crypto.randomUUID().slice(0, 8), work: '', theme: 'green', position: 'bottom-left', size: '40', dateMode: 'date'});
 function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
@@ -51,16 +52,22 @@ function fillItems() {
 }
 function snapshot() {
   const siteId = $('site').value;
-  return {siteId, site: settings.sites.find(s => s.id === siteId)?.name || '地点未設定', work: $('work').value.trim(), item: $('item').value.trim(), theme: $('theme').value, position: $('position').value, size: Number($('size').value), dateMode: $('date-mode').value, boardDate: $('manual-date').value || current?.selectedAt || ''};
+  return {siteId, site: settings.sites.find(s => s.id === siteId)?.name || '地点未設定', work: $('work').value.trim(), item: $('item').value.trim(), theme: $('theme').value, position: $('position').value, size: Number($('size').value), dateMode: $('date-mode').value, boardDate: $('manual-date').value || (cameraStream ? localInputDate(new Date()) : current?.selectedAt) || ''};
 }
 function render() {
   $('size-label').textContent = `${$('size').value}%`;
   for (const button of $('item-buttons').children) button.classList.toggle('selected', button.textContent === $('item').value);
-  $('save').disabled = !current || busy;
+  $('save').disabled = !current || busy || !!cameraStream || cameraOpening;
+  $('start-camera').disabled = busy || !!cameraStream || cameraOpening;
+  $('capture').disabled = busy || !cameraStream || !$('live-video').videoWidth;
+  if (cameraStream) renderLiveBoard();
   if (!current) return;
   const canvas = $('preview'), ctx = canvas.getContext('2d');
   ctx.drawImage(current.image, 0, 0, canvas.width, canvas.height);
-  const data = snapshot(), {x, y, w, h} = boardRect(canvas.width, canvas.height, data.size, data.position);
+  drawBoard(ctx, canvas.width, canvas.height, snapshot());
+}
+function drawBoard(ctx, width, height, data) {
+  const {x, y, w, h} = boardRect(width, height, data.size, data.position);
   ctx.fillStyle = data.theme === 'green' ? '#164a3b' : '#fffdf4'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = data.theme === 'green' ? '#e3dfc3' : '#4b5551'; ctx.lineWidth = Math.max(1, w / 170); ctx.strokeRect(x + 3, y + 3, w - 6, h - 6);
   const lines = [['地点', data.site], ['工種', data.work || '—'], ['項目', data.item || '—']];
@@ -79,29 +86,100 @@ function render() {
   });
 }
 function localInputDate(date) { return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
-async function loadPhoto(event) {
-  const file = event.target.files[0]; if (!file) return;
-  if (busy) return;
+
+function renderLiveBoard() {
+  const video = $('live-video'), canvas = $('live-board');
+  if (!cameraStream || !video.videoWidth) return;
+  // Same aspect ratio and board geometry as capture; CSS never crops the video.
+  const scale = Math.min(1, 1280 / video.videoWidth);
+  const width = Math.round(video.videoWidth * scale), height = Math.round(video.videoHeight * scale);
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+  const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, width, height);
+  drawBoard(ctx, width, height, snapshot());
+  $('camera-resolution').textContent = `${video.videoWidth} × ${video.videoHeight}px・ライブ映像から撮影（標準カメラの画質とは異なります）`;
+  $('capture').disabled = busy;
+}
+function stopCamera() {
+  cameraRequest += 1; cameraOpening = false;
+  clearInterval(clockTimer); clockTimer = null;
+  if (cameraStream) for (const track of cameraStream.getTracks()) track.stop();
+  cameraStream = null; $('live-video').srcObject = null;
+  $('live-view').hidden = true; $('live-controls').hidden = true;
+  $('preview').hidden = !current; $('placeholder').hidden = !!current;
+  render();
+}
+async function startCamera() {
+  if (busy || cameraOpening || cameraStream) return;
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('この環境ではライブカメラを使えません。HTTPSで開くか「標準カメラ」を使ってください。');
+  if (!snapshot().siteId) throw new Error('先に地点を登録・選択してください。');
+  if (current && !confirm('未保存の写真があります。ライブ撮影した場合は置き換わります。カメラを開きますか？')) return;
+  cameraOpening = true; const request = ++cameraRequest; render();
+  status('カメラの使用を許可してください。音声は取得しません。');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio:false, video:{facingMode:{ideal:'environment'}, width:{ideal:4032}, height:{ideal:3024}}});
+    if (request !== cameraRequest || document.hidden || $('shoot').hidden) { stream.getTracks().forEach(t => t.stop()); return; }
+    cameraStream = stream; const video = $('live-video');
+    video.srcObject = stream; $('live-view').hidden = false; $('live-controls').hidden = false;
+    $('preview').hidden = true; $('placeholder').hidden = true;
+    await video.play();
+    if (request !== cameraRequest) return;
+    for (const track of stream.getVideoTracks()) track.addEventListener('ended', () => { if (cameraStream === stream) { stopCamera(); status('カメラ映像が停止しました。もう一度起動してください。', true); } });
+    clockTimer = setInterval(renderLiveBoard, 1000);
+    renderLiveBoard();
+    status('黒板の位置を見ながら構図を決め、「この位置で撮影」を押してください。');
+    $('viewfinder').scrollIntoView({behavior:'smooth', block:'center'});
+  } catch (error) {
+    if (request !== cameraRequest) return;
+    stopCamera();
+    const messages = {NotAllowedError:'カメラの使用が許可されませんでした。ブラウザのカメラ許可を確認するか「標準カメラ」を使ってください。',NotFoundError:'カメラが見つかりません。「写真を選ぶ」から取り込めます。',NotReadableError:'カメラを起動できません。他のカメラアプリを閉じて再試行してください。'};
+    throw new Error(messages[error.name] || 'カメラを起動できません。「標準カメラ」でも撮影できます。');
+  } finally { if (request === cameraRequest) cameraOpening = false; render(); }
+}
+async function captureLive() {
+  if (busy || !cameraStream) return;
+  const video = $('live-video');
+  if (video.readyState < 2 || !video.videoWidth) throw new Error('映像の準備ができていません。少し待って再試行してください。');
   busy = true; render();
+  try {
+    const now = new Date(), canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    if (canvas.width * canvas.height > 25000000) throw new Error('ライブ画像が大きすぎます。「標準カメラ」で12MP程度の写真を取り込んでください。');
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const blob = await new Promise((resolve,reject) => canvas.toBlob(b => b ? resolve(b) : reject(new Error('撮影画像を作成できませんでした。')), 'image/jpeg', 0.95));
+    const file = new File([blob], 'live-camera.jpg', {type:'image/jpeg'});
+    await setPhoto(file, now, 'live-camera');
+    stopCamera();
+    status(`${canvas.width} × ${canvas.height}pxで撮影しました。黒板を確認し「黒板を合成して端末内に保存」を押してください。`);
+  } finally { busy = false; render(); }
+}
+async function setPhoto(file, now, source) {
   const url = URL.createObjectURL(file);
   try {
-    status('写真を読み込んでいます…');
     const image = new Image(); image.src = url;
     try { await image.decode(); } catch { throw new Error('この画像形式は読み込めません。JPEG形式で撮影・選択してください。'); }
     const width = image.naturalWidth, height = image.naturalHeight;
-    // Avoid silently downscaling large originals or exhausting phone memory.
     if (width * height > 25000000) throw new Error('試作版では合成対象は2500万画素までです。カメラの設定を12MP程度にして再撮影してください。');
     if (!width || !height) throw new Error('画像サイズを取得できません。');
     if (current) URL.revokeObjectURL(current.url);
-    const now = new Date();
-    current = {file, image, url, selectedAt: localInputDate(now), importedAt: now.toISOString(), date: localDate(now)};
+    current = {file, image, url, selectedAt: localInputDate(now), importedAt: now.toISOString(), date: localDate(now), source, capturedAt: source === 'live-camera' ? now.toISOString() : null};
     $('preview').width = width; $('preview').height = height; $('preview').hidden = false; $('placeholder').hidden = true;
-    status(`${width} × ${height}px。地点・写真項目・黒板を確認して保存してください。`);
   } catch (error) { URL.revokeObjectURL(url); throw error; }
+}
+async function loadPhoto(event) {
+  const file = event.target.files[0]; if (!file) return;
+  if (busy) return;
+  stopCamera();
+  busy = true; render();
+  try {
+    status('写真を読み込んでいます…');
+    await setPhoto(file, new Date(), 'file-import');
+    status(`${$('preview').width} × ${$('preview').height}px。地点・写真項目・黒板を確認して保存してください。`);
+  }
   finally { busy = false; event.target.value = ''; render(); }
 }
 async function savePhoto() {
-  if (!current || busy) return;
+  if (!current || busy || cameraStream || cameraOpening) return;
   const meta = snapshot();
   if (!meta.siteId) throw new Error('先に地点を登録・選択してください。');
   if (!meta.item) throw new Error('写真項目を入力してください。');
@@ -112,7 +190,7 @@ async function savePhoto() {
     const id = crypto.randomUUID(), stem = fileStem({date: current.date, site: meta.site, item: meta.item, deviceId: settings.deviceId, id});
     const ext = current.file.name.split('.').pop()?.toLowerCase();
     const originalExtension = /^[a-z0-9]{1,8}$/.test(ext) ? ext : 'bin';
-    const metadata = {schemaVersion: 1, id, deviceId: settings.deviceId, ...meta, importedAt: current.importedAt, savedAt: new Date().toISOString(), capturedAt: null, dateSource: 'device-import-time', originalName: current.file.name, originalType: current.file.type, width: $('preview').width, height: $('preview').height, originalFile: `${stem}__original.${originalExtension}`, composedFile: `${stem}__board.jpg`, metadataFile: `${stem}.json`};
+    const metadata = {schemaVersion: 1, id, deviceId: settings.deviceId, ...meta, importedAt: current.importedAt, savedAt: new Date().toISOString(), capturedAt: current.capturedAt, dateSource: current.source === 'live-camera' ? 'device-capture-time' : 'device-import-time', source: current.source, originalIsBrowserFrame: current.source === 'live-camera', originalName: current.file.name, originalType: current.file.type, width: $('preview').width, height: $('preview').height, originalFile: `${stem}__original.${originalExtension}`, composedFile: `${stem}__board.jpg`, metadataFile: `${stem}.json`};
     await transaction('photos', 'readwrite', store => store.add({id, metadata, original: current.file, composed}));
     URL.revokeObjectURL(current.url); current = null; $('preview').hidden = true; $('placeholder').hidden = false;
     await refreshCount(); status('端末内への保存が完了しました。「保存写真」から写真アプリへの共有・PC向け書き出しができます。');
@@ -142,6 +220,17 @@ async function gallery() {
     const img = document.createElement('img'), url = URL.createObjectURL(photo.composed); galleryURLs.push(url); img.src = url; img.alt = `${photo.metadata.site} ${photo.metadata.item}`; img.loading = 'lazy';
     const title = document.createElement('h2'); title.textContent = `${photo.metadata.site} / ${photo.metadata.item}`;
     const name = document.createElement('p'); name.className = 'filename'; name.textContent = photo.metadata.composedFile;
+    const info = document.createElement('details'); info.className = 'metadata';
+    const summary = document.createElement('summary'); summary.textContent = '仕分け用データを確認';
+    const list = document.createElement('dl'); list.className = 'metadata-list';
+    const m = photo.metadata;
+    const dateText = value => value ? new Date(value).toLocaleString('ja-JP') : '未取得（EXIFは読み取りません）';
+    for (const [label,value] of [['地点',m.site],['工種',m.work || '未設定'],['写真項目',m.item],['撮影日時',dateText(m.capturedAt)],['取込日時',dateText(m.importedAt)],['黒板表示日時',m.boardDate || '未設定'],['日時表示',m.dateMode === 'none' ? '表示なし' : m.dateMode === 'date' ? '年月日' : '年月日＋時分'],['画像寸法',`${m.width} × ${m.height}px`],['撮影方式',m.source === 'live-camera' ? 'ライブ映像からの撮影' : '標準カメラ・画像取り込み'],['端末ID',m.deviceId]]) {
+      const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = value; list.append(dt,dd);
+    }
+    const note = document.createElement('p'); note.className = 'note'; note.textContent = 'この情報はアプリ内と管理JSONに保存しています。写真アプリの画像だけでは、工種等のデータは取り出せません。PCへは画像とJSONをセットで渡してください。日時は端末時計による記録です。';
+    const raw = document.createElement('pre'); raw.className = 'metadata-json'; raw.textContent = JSON.stringify(m, null, 2);
+    info.append(summary,list,note,raw);
     const buttons = document.createElement('div'); buttons.className = 'buttons';
     const add = (label, action) => { const b = document.createElement('button'); b.textContent = label; b.onclick = run(action); buttons.append(b); };
     const files = filesFor(photo);
@@ -151,7 +240,7 @@ async function gallery() {
       if (!confirm('原本・合成写真・管理情報を端末内から削除します。書き出し先で写真を確認しましたか？この操作は元に戻せません。')) return;
       await transaction('photos', 'readwrite', store => store.delete(photo.id)); await refreshCount(); await gallery();
     });
-    card.append(title, img, name, buttons); $('photos').append(card);
+    card.append(title, img, name, info, buttons); $('photos').append(card);
   }
 }
 async function init() {
@@ -165,6 +254,7 @@ async function init() {
   for (const [id,key] of [['work','work'],['theme','theme'],['position','position'],['size','size'],['date-mode','dateMode']]) $(id).value = settings[key];
   await refreshCount();
   document.querySelectorAll('.tab').forEach(button => button.onclick = run(async () => {
+    if (button.dataset.page !== 'shoot') stopCamera();
     document.querySelectorAll('.page').forEach(page => page.hidden = page.id !== button.dataset.page);
     document.querySelectorAll('.tab').forEach(tab => { tab.classList.toggle('active', tab === button); tab.setAttribute('aria-pressed', String(tab === button)); });
     if (button.dataset.page === 'library') await gallery();
@@ -184,11 +274,25 @@ async function init() {
     await updateSettings({...settings, selectedSite: $('site').value, work: $('work').value, theme: $('theme').value, position: $('position').value, size: $('size').value, dateMode: $('date-mode').value});
   }));
   $('camera').onchange = run(loadPhoto); $('import').onchange = run(loadPhoto); $('save').onclick = run(savePhoto);
+  $('start-camera').onclick = run(startCamera); $('capture').onclick = run(captureLive); $('stop-camera').onclick = () => { stopCamera(); status('カメラを閉じました。'); };
+  $('live-video').addEventListener('resize', renderLiveBoard);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
+  window.addEventListener('pagehide', stopCamera);
   $('persist').onclick = run(async () => status(await navigator.storage?.persist?.() ? 'データ保持が許可されました。PCへの書き出しも続けてください。' : '保持の保証はありません。こまめにPCへ書き出してください。'));
   render();
   if ('serviceWorker' in navigator && window.isSecureContext) {
     try {
-      await navigator.serviceWorker.register('./sw.js');
+      const registration = await navigator.serviceWorker.register('./sw.js');
+      let updating = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => { if (updating) location.reload(); });
+      const showUpdate = () => { if (registration.waiting) $('update-app').hidden = false; };
+      showUpdate();
+      registration.addEventListener('updatefound', () => { registration.installing?.addEventListener('statechange', showUpdate); });
+      $('update-app').onclick = () => {
+        if (current || busy || cameraOpening) { status('未保存の写真があります。先に写真を保存してから更新してください。', true); return; }
+        if (!registration.waiting) return;
+        stopCamera(); updating = true; registration.waiting.postMessage('SKIP_WAITING');
+      };
       await navigator.serviceWorker.ready;
       $('offline').textContent = '準備済み（この端末で実機確認してください）';
     } catch { $('offline').textContent = '準備に失敗。通信状態で再読み込みしてください'; }

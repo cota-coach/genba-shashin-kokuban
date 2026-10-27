@@ -18,7 +18,11 @@ YYYYMMDD__地点名__写真項目__端末ID__写真UUID.json
 
 `schemaVersion: 1`。`id` は写真UUID。`siteId`, `site`, `work`, `item`, `deviceId` を記録します。`theme`, `position`, `size`, `dateMode`, `boardDate` は合成時の黒板設定です。
 
-`importedAt` と `savedAt` はUTCのISO8601文字列。`boardDate` はタイムゾーンを含まない黒板表示用のローカル日時文字列です。日時修正は `boardDate` のみを変えます。`capturedAt` は未取得なので `null`、`dateSource` は `device-import-time`。撮影日時が検証済みだと解釈しないでください。
+`importedAt` と `savedAt` はUTCのISO8601文字列。`boardDate` はタイムゾーンを含まない黒板表示用のローカル日時文字列です。日時修正は `boardDate` のみを変えます。標準カメラ／画像取り込み時は `capturedAt: null`、`dateSource: device-import-time` です。
+
+v0.2.0では後方互換の追加フィールドとして `source`（`file-import` または `live-camera`）と `originalIsBrowserFrame` を記録します。旧記録では両フィールドがありません。ライブ撮影では `capturedAt` にシャッター操作時の端末時計をUTCで記録し、`dateSource: device-capture-time`、`originalIsBrowserFrame: true` です。ライブ撮影の原本は黒板合成前の動画フレームJPEGです。標準カメラのセンサー原本、EXIF由来の撮影時刻とは異なります。日時は第三者が検証済みだと解釈しないでください。
+
+管理情報はアプリ内IndexedDBと別ファイルのJSONに保持し、合成JPEGのEXIFへ埋め込んではいません。写真アプリの合成画像だけを取り出しても工種等の構造データは復元できません。PCへは画像とJSONをセットで渡してください。「保存写真」→「仕分け用データを確認」で既存保存写真も含めて確認できます。
 
 `width`, `height` はブラウザでデコードした画像の向きに対応するピクセル寸法。`originalName`, `originalType`, `originalFile`, `composedFile`, `metadataFile` を持ちます。
 
