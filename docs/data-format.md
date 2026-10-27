@@ -18,6 +18,8 @@ YYYYMMDD__地点名__写真項目__端末ID__写真UUID.json
 
 `schemaVersion: 1`。`id` は写真UUID。`siteId`, `site`, `work`, `item`, `deviceId` を記録します。`theme`, `position`, `size`, `dateMode`, `boardDate` は合成時の黒板設定です。
 
+v0.3.0では `boardX`, `boardY` を追加します。値が `null` または存在しない場合は従来の `position` の四隅を使用します。値がある場合は0〜1で、黒板の移動可能範囲に対する横・縦の相対位置です（0が左／上、1が右／下）。画像外へはみ出さず、映像の縦横比・保存サイズが変わっても同じ相対位置になります。`size` は画像幅に対する黒板幅の指定割合で、縦長さには画像内へ収まる上限を設けています。これらは画像の中の黒板位置であり、GPS位置ではありません。
+
 `importedAt` と `savedAt` はUTCのISO8601文字列。`boardDate` はタイムゾーンを含まない黒板表示用のローカル日時文字列です。日時修正は `boardDate` のみを変えます。標準カメラ／画像取り込み時は `capturedAt: null`、`dateSource: device-import-time` です。
 
 v0.2.0では後方互換の追加フィールドとして `source`（`file-import` または `live-camera`）と `originalIsBrowserFrame` を記録します。旧記録では両フィールドがありません。ライブ撮影では `capturedAt` にシャッター操作時の端末時計をUTCで記録し、`dateSource: device-capture-time`、`originalIsBrowserFrame: true` です。ライブ撮影の原本は黒板合成前の動画フレームJPEGです。標準カメラのセンサー原本、EXIF由来の撮影時刻とは異なります。日時は第三者が検証済みだと解釈しないでください。

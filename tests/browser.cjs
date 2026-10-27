@@ -6,8 +6,9 @@ const fs = require('node:fs/promises');
 (async () => {
   const browser = await chromium.launch({executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', args:['--no-sandbox', '--use-fake-device-for-media-stream']});
   try {
-    const context = await browser.newContext({viewport:{width:390,height:844}, acceptDownloads:true, permissions:['camera']});
+    const context = await browser.newContext({viewport:{width:390,height:844}, acceptDownloads:true, permissions:['camera'], isMobile:true, hasTouch:true});
     const page = await context.newPage();
+    const touch = await context.newCDPSession(page);
     const errors = []; page.on('pageerror', e => errors.push(e.message));
     await page.goto('http://127.0.0.1:8080/');
     await page.waitForFunction(() => document.querySelector('#offline').textContent.startsWith('準備済み'));
@@ -91,7 +92,42 @@ const fs = require('node:fs/promises');
       return {pixel:Array.from(c.getContext('2d').getImageData(Math.round(r.x+r.w*.5),Math.round(r.y+r.h*.94),1,1).data),width:video.videoWidth,height:video.videoHeight};
     });
     assert.deepEqual(overlay.pixel,[255,253,244,255], 'board appears on live video in selected corner');
-    await page.locator('#live-view').screenshot({path:'test-results/live-camera.png'});
+    for (const [width,height] of [[390,844],[320,568],[844,390],[667,375]]) {
+      await page.setViewportSize({width,height});
+      await page.waitForFunction(() => {
+        const screen=document.querySelector('#camera-screen').getBoundingClientRect();
+        return Math.abs(screen.height-innerHeight) < 1 && Math.abs(screen.width-innerWidth) < 1;
+      });
+      for (const selector of ['#capture','#size-up','#size-down','#stop-camera','#edit-board','[data-move=up]','[data-move=down]','[data-move=left]','[data-move=right]']) {
+        const box=await page.locator(selector).boundingBox();
+        assert.ok(box && box.x >= 0 && box.y >= 0 && box.x+box.width <= width+1 && box.y+box.height <= height+1, `${selector} fits ${width}x${height}`);
+      }
+      const before=await page.evaluate(() => ({scroll:scrollY,top:document.querySelector('#live-view').getBoundingClientRect().top}));
+      await page.mouse.move(width/2,height/2);await page.mouse.wheel(0,500);
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:width/2,y:height/2}]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:width/2,y:height/2-60}]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      const after=await page.evaluate(() => ({scroll:scrollY,top:document.querySelector('#live-view').getBoundingClientRect().top}));
+      assert.deepEqual(after,before,'camera does not scroll');
+      await page.locator('#camera-screen').screenshot({path:`test-results/fullscreen-${width}x${height}.png`});
+    }
+    await page.setViewportSize({width:390,height:844});
+    await page.getByRole('button',{name:'黒板を左へ',exact:true}).click();
+    await page.getByRole('button',{name:'黒板を下へ',exact:true}).click();
+    await page.getByRole('button',{name:'黒板を拡大',exact:true}).click();
+    assert.equal(await page.locator('#live-size').textContent(),'45%');
+    await page.getByRole('button',{name:'黒板の文字を編集',exact:true}).click();
+    await page.locator('#editor-work').fill('変更しない');
+    await page.locator('#editor-cancel').click();
+    assert.equal(await page.locator('#work').inputValue(),'水位計 定期点検');
+    await page.getByRole('button',{name:'黒板の文字を編集',exact:true}).click();
+    await page.locator('#editor-site-name').fill('白上川 1K4R 確認');
+    await page.locator('#editor-work').fill('定期点検（現場で変更）');
+    await page.locator('#editor-item').fill('センサー部');
+    await page.getByRole('button',{name:'反映する',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('#board-editor').open);
+    assert.equal(await page.locator('#item').inputValue(),'センサー部');
+    await page.locator('#camera-screen').screenshot({path:'test-results/live-camera.png'});
     await page.locator('#capture').click();
     await page.waitForFunction(() => !document.querySelector('#save').disabled);
     assert.equal(await page.locator('#live-view').isVisible(),false);
@@ -107,28 +143,38 @@ const fs = require('node:fs/promises');
       for (const blob of [p.original,p.composed]) {
         const image=await createImageBitmap(blob), c=document.createElement('canvas');c.width=image.width;c.height=image.height;
         const ctx=c.getContext('2d');ctx.drawImage(image,0,0);image.close();
-        const r=boardRect(c.width,c.height,p.metadata.size,p.metadata.position);
+        const r=boardRect(c.width,c.height,p.metadata.size,p.metadata.position,{x:p.metadata.boardX,y:p.metadata.boardY});
         pixels.push(Array.from(ctx.getImageData(Math.round(r.x+r.w*.5),Math.round(r.y+r.h*.94),1,1).data));
       }
-      return {metadata:p.metadata,pixels};
+      return {metadata:p.metadata,pixels,oldSite:all.find(p => p.metadata.source === 'file-import').metadata.site};
     });
     assert.equal(live.metadata.originalIsBrowserFrame,true);
     assert.equal(live.metadata.dateSource,'device-capture-time');
     assert.ok(Number.isFinite(Date.parse(live.metadata.capturedAt)));
     assert.equal(live.metadata.width, overlay.width);assert.equal(live.metadata.height, overlay.height);
+    assert.equal(live.metadata.boardX,0.96);assert.equal(live.metadata.boardY,0.04);
+    assert.equal(live.metadata.size,45);assert.equal(live.metadata.work,'定期点検（現場で変更）');
+    assert.equal(live.metadata.item,'センサー部');assert.equal(live.metadata.site,'白上川 1K4R 確認');
+    assert.equal(live.oldSite,'白上川 1K4R','renaming the site does not change old saved records');
     assert.notDeepEqual(live.pixels[0],live.pixels[1], 'original has no composited board');
     assert.ok(live.pixels[1][0] > 245 && live.pixels[1][1] > 245 && live.pixels[1][2] > 235, 'saved board matches live position');
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector('#count').textContent === '3');
+    assert.equal(await page.locator('#size').inputValue(),'45','size retained after reload');
     await page.locator('#start-camera').click();
     await page.waitForFunction(() => !document.querySelector('#capture').disabled);
+    await page.locator('#stop-camera').click();
     await page.getByRole('button',{name:/保存写真/}).click();
-    assert.equal(await page.locator('#live-video').evaluate(video => video.srcObject),null,'leaving shoot stops camera');
+    assert.equal(await page.locator('#live-video').evaluate(video => video.srcObject),null,'closing camera stops stream');
     await page.getByRole('button',{name:'撮影',exact:true}).click();
     await page.evaluate(() => { navigator.mediaDevices.getUserMedia=async () => { throw new DOMException('denied','NotAllowedError'); }; });
     await page.locator('#start-camera').click();
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('許可されませんでした'));
     assert.equal(await page.locator('#start-camera').isEnabled(),true);
+    assert.equal(await page.locator('#camera-screen').evaluate(dialog => dialog.open),false,'denial unlocks the page');
+    assert.equal(await page.locator('html').evaluate(el => el.classList.contains('camera-open')),false);
     assert.deepEqual(errors,[]);
-    console.log('PASS: register, import, composition, original integrity, metadata display/JSON export, restart, download, offline save, failed-save retry, live overlay/capture, camera cleanup, permission denial');
+    console.log('PASS: import/original integrity, JSON export, offline/retry, full-screen scroll lock (4 viewports), board move/resize/edit/cancel, capture metadata and geometry, camera cleanup, permission denial');
     await context.close();
   } finally { await browser.close(); }
 })().catch(error => { console.error(error);process.exitCode=1; });

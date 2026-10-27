@@ -3,9 +3,12 @@ import {fileStem, localDate, boardRect, displayDate} from './core.js';
 const $ = id => document.getElementById(id);
 let db, settings, current, busy = false;
 let cameraStream = null, cameraOpening = false, cameraRequest = 0, clockTimer = null;
+let boardPlacement = {x:null, y:null}, cameraScrollY = 0, settingsWrites = Promise.resolve();
 let galleryURLs = [];
 const defaults = () => ({sites: [], items: ['全景', '盤面', 'センサー部', '基礎・杭', 'その他'], deviceId: crypto.randomUUID().slice(0, 8), work: '', theme: 'green', position: 'bottom-left', size: '40', dateMode: 'date'});
-function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
+function status(message, error = false) {
+  for (const id of ['status','camera-status']) { $(id).textContent = message; $(id).classList.toggle('error', error); }
+}
 function run(fn) { return async (...args) => { try { await fn(...args); } catch (e) { console.error(e.name); status(`処理できませんでした。${e.message} 写真を選択中なら、画面を閉じずに再試行してください。`, true); } }; }
 function transaction(store, mode, operation) {
   return new Promise((resolve, reject) => {
@@ -19,6 +22,11 @@ function transaction(store, mode, operation) {
 const read = (store, key) => transaction(store, 'readonly', s => s.get(key));
 const writeSettings = next => transaction('settings', 'readwrite', s => s.put(next, 'main'));
 async function updateSettings(next) { await writeSettings(next); settings = next; }
+function saveCaptureSettings() {
+  const patch = {selectedSite:$('site').value, work:$('work').value, theme:$('theme').value, position:$('position').value, size:$('size').value, dateMode:$('date-mode').value, boardX:boardPlacement.x, boardY:boardPlacement.y};
+  settingsWrites = settingsWrites.catch(() => {}).then(() => updateSettings({...settings, ...patch}));
+  return settingsWrites;
+}
 
 function fillSites() {
   $('site').replaceChildren(...settings.sites.map(site => new Option(site.name, site.id)));
@@ -52,14 +60,21 @@ function fillItems() {
 }
 function snapshot() {
   const siteId = $('site').value;
-  return {siteId, site: settings.sites.find(s => s.id === siteId)?.name || '地点未設定', work: $('work').value.trim(), item: $('item').value.trim(), theme: $('theme').value, position: $('position').value, size: Number($('size').value), dateMode: $('date-mode').value, boardDate: $('manual-date').value || (cameraStream ? localInputDate(new Date()) : current?.selectedAt) || ''};
+  return {siteId, site: settings.sites.find(s => s.id === siteId)?.name || '地点未設定', work: $('work').value.trim(), item: $('item').value.trim(), theme: $('theme').value, position: $('position').value, boardX:boardPlacement.x, boardY:boardPlacement.y, size: Number($('size').value), dateMode: $('date-mode').value, boardDate: $('manual-date').value || (cameraStream ? localInputDate(new Date()) : current?.selectedAt) || ''};
 }
 function render() {
   $('size-label').textContent = `${$('size').value}%`;
+  $('live-size').textContent = `${$('size').value}%`;
+  $('size-down').disabled = Number($('size').value) <= 15 || busy;
+  $('size-up').disabled = Number($('size').value) >= 75 || busy;
+  $('camera-site').textContent = snapshot().site;
   for (const button of $('item-buttons').children) button.classList.toggle('selected', button.textContent === $('item').value);
   $('save').disabled = !current || busy || !!cameraStream || cameraOpening;
   $('start-camera').disabled = busy || !!cameraStream || cameraOpening;
-  $('capture').disabled = busy || !cameraStream || !$('live-video').videoWidth;
+  $('capture').disabled = busy || !cameraStream || !$('live-video').videoWidth || $('board-editor').open;
+  $('edit-board').disabled = busy || !cameraStream;
+  $('board-edit-hit').disabled = busy || !cameraStream;
+  for (const button of document.querySelectorAll('[data-move]')) button.disabled = busy;
   if (cameraStream) renderLiveBoard();
   if (!current) return;
   const canvas = $('preview'), ctx = canvas.getContext('2d');
@@ -67,7 +82,7 @@ function render() {
   drawBoard(ctx, canvas.width, canvas.height, snapshot());
 }
 function drawBoard(ctx, width, height, data) {
-  const {x, y, w, h} = boardRect(width, height, data.size, data.position);
+  const {x, y, w, h} = boardRect(width, height, data.size, data.position, {x:data.boardX, y:data.boardY});
   ctx.fillStyle = data.theme === 'green' ? '#164a3b' : '#fffdf4'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = data.theme === 'green' ? '#e3dfc3' : '#4b5551'; ctx.lineWidth = Math.max(1, w / 170); ctx.strokeRect(x + 3, y + 3, w - 6, h - 6);
   const lines = [['地点', data.site], ['工種', data.work || '—'], ['項目', data.item || '—']];
@@ -87,23 +102,92 @@ function drawBoard(ctx, width, height, data) {
 }
 function localInputDate(date) { return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
 
+function openCameraScreen() {
+  if ($('camera-screen').open) return;
+  cameraScrollY = window.scrollY;
+  document.body.style.top = `-${cameraScrollY}px`;
+  document.documentElement.classList.add('camera-open');
+  $('camera-screen').showModal();
+}
+function closeCameraScreen() {
+  if ($('board-editor').open) $('board-editor').close();
+  if (!$('camera-screen').open) return;
+  $('camera-screen').close();
+  document.documentElement.classList.remove('camera-open');
+  document.body.style.top = '';
+  window.scrollTo(0,cameraScrollY);
+}
+function layoutCamera() {
+  const video = $('live-video'), stage = $('live-stage');
+  if (!cameraStream || !video.videoWidth || !stage.clientWidth || !stage.clientHeight) return;
+  const ratio = Math.min(stage.clientWidth / video.videoWidth, stage.clientHeight / video.videoHeight);
+  $('live-view').style.width = `${video.videoWidth * ratio}px`;
+  $('live-view').style.height = `${video.videoHeight * ratio}px`;
+}
+async function moveBoard(direction) {
+  if (!cameraStream || busy) return;
+  const data = snapshot();
+  const x = Number.isFinite(boardPlacement.x) ? boardPlacement.x : data.position.endsWith('right') ? 1 : 0;
+  const y = Number.isFinite(boardPlacement.y) ? boardPlacement.y : data.position.startsWith('top') ? 0 : 1;
+  const clamp = value => Math.max(0, Math.min(1,value));
+  boardPlacement = direction === 'center' ? {x:0.5,y:0.5} : {x:clamp(x + (direction === 'left' ? -0.04 : direction === 'right' ? 0.04 : 0)),y:clamp(y + (direction === 'up' ? -0.04 : direction === 'down' ? 0.04 : 0))};
+  render(); await saveCaptureSettings();
+}
+async function resizeBoard(delta) {
+  if (!cameraStream || busy) return;
+  $('size').value = Math.max(15,Math.min(75,Number($('size').value) + delta));
+  render(); await saveCaptureSettings();
+}
+function openBoardEditor() {
+  if (!cameraStream || busy || $('board-editor').open) return;
+  $('editor-site').replaceChildren(...settings.sites.map(site => new Option(site.name,site.id)));
+  $('editor-site').value = $('site').value;
+  $('editor-site-name').value = snapshot().site;
+  for (const [target,source] of [['editor-work','work'],['editor-item','item'],['editor-theme','theme'],['editor-date-mode','date-mode'],['editor-date','manual-date']]) $(target).value = $(source).value;
+  $('editor-position').value = 'keep'; $('editor-error').textContent = '';
+  $('board-editor').showModal(); render();
+}
+async function applyBoardEditor(event) {
+  event.preventDefault();
+  const name = $('editor-site-name').value.trim(), item = $('editor-item').value.trim(), id = $('editor-site').value;
+  try {
+    if (!cameraStream) throw new Error('カメラが停止しました。閉じて起動し直してください。');
+    if (!name || !item) throw new Error('地点名と写真項目を入力してください。');
+    if (settings.sites.some(site => site.id !== id && site.name === name)) throw new Error('同じ地点名が登録されています。登録地点を選び直してください。');
+    if (!settings.sites.some(site => site.id === id)) throw new Error('登録地点を選んでください。');
+    const position = $('editor-position').value;
+    await settingsWrites.catch(() => {});
+    await updateSettings({...settings, sites:settings.sites.map(site => site.id === id ? {...site,name} : site), selectedSite:id, work:$('editor-work').value.trim(), theme:$('editor-theme').value, dateMode:$('editor-date-mode').value, position:position === 'keep' ? $('position').value : position, boardX:position === 'keep' ? boardPlacement.x : null, boardY:position === 'keep' ? boardPlacement.y : null});
+    fillSites();
+    for (const [target,source] of [['work','editor-work'],['item','editor-item'],['theme','editor-theme'],['date-mode','editor-date-mode'],['manual-date','editor-date']]) $(target).value = $(source).value.trim();
+    $('position').value = settings.position; boardPlacement = {x:settings.boardX,y:settings.boardY};
+    $('board-editor').close(); render(); status('黒板に反映しました。位置と文字を確認して撮影してください。');
+  } catch(error) { $('editor-error').textContent = error.message; }
+}
+
 function renderLiveBoard() {
   const video = $('live-video'), canvas = $('live-board');
   if (!cameraStream || !video.videoWidth) return;
+  layoutCamera();
   // Same aspect ratio and board geometry as capture; CSS never crops the video.
   const scale = Math.min(1, 1280 / video.videoWidth);
   const width = Math.round(video.videoWidth * scale), height = Math.round(video.videoHeight * scale);
   if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
   const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, width, height);
   drawBoard(ctx, width, height, snapshot());
-  $('camera-resolution').textContent = `${video.videoWidth} × ${video.videoHeight}px・ライブ映像から撮影（標準カメラの画質とは異なります）`;
-  $('capture').disabled = busy;
+  const data = snapshot(), rect = boardRect(width,height,data.size,data.position,{x:data.boardX,y:data.boardY});
+  const hit = $('board-edit-hit');
+  hit.style.left = `${rect.x / width * 100}%`; hit.style.top = `${rect.y / height * 100}%`;
+  hit.style.width = `${rect.w / width * 100}%`; hit.style.height = `${rect.h / height * 100}%`;
+  $('camera-resolution').textContent = `${video.videoWidth} × ${video.videoHeight}px · ライブ撮影`;
+  $('capture').disabled = busy || $('board-editor').open;
 }
 function stopCamera() {
   cameraRequest += 1; cameraOpening = false;
   clearInterval(clockTimer); clockTimer = null;
   if (cameraStream) for (const track of cameraStream.getTracks()) track.stop();
   cameraStream = null; $('live-video').srcObject = null;
+  closeCameraScreen();
   $('live-view').hidden = true; $('live-controls').hidden = true;
   $('preview').hidden = !current; $('placeholder').hidden = !!current;
   render();
@@ -114,6 +198,7 @@ async function startCamera() {
   if (!snapshot().siteId) throw new Error('先に地点を登録・選択してください。');
   if (current && !confirm('未保存の写真があります。ライブ撮影した場合は置き換わります。カメラを開きますか？')) return;
   cameraOpening = true; const request = ++cameraRequest; render();
+  openCameraScreen();
   status('カメラの使用を許可してください。音声は取得しません。');
   let stream;
   try {
@@ -127,8 +212,7 @@ async function startCamera() {
     for (const track of stream.getVideoTracks()) track.addEventListener('ended', () => { if (cameraStream === stream) { stopCamera(); status('カメラ映像が停止しました。もう一度起動してください。', true); } });
     clockTimer = setInterval(renderLiveBoard, 1000);
     renderLiveBoard();
-    status('黒板の位置を見ながら構図を決め、「この位置で撮影」を押してください。');
-    $('viewfinder').scrollIntoView({behavior:'smooth', block:'center'});
+    status('矢印で移動・＋−でサイズ変更。黒板タップで文字編集。');
   } catch (error) {
     if (request !== cameraRequest) return;
     stopCamera();
@@ -137,7 +221,7 @@ async function startCamera() {
   } finally { if (request === cameraRequest) cameraOpening = false; render(); }
 }
 async function captureLive() {
-  if (busy || !cameraStream) return;
+  if (busy || !cameraStream || $('board-editor').open) return;
   const video = $('live-video');
   if (video.readyState < 2 || !video.videoWidth) throw new Error('映像の準備ができていません。少し待って再試行してください。');
   busy = true; render();
@@ -250,6 +334,7 @@ async function init() {
     req.onsuccess = () => resolve(req.result); req.onerror = () => reject(new Error('端末内保存が使えません。プライベートブラウズや保存設定を確認してください。'));
   });
   settings = await read('settings', 'main') || defaults(); await writeSettings(settings);
+  boardPlacement = {x:settings.boardX ?? null,y:settings.boardY ?? null};
   fillSites(); fillItems(); $('device').textContent = settings.deviceId;
   for (const [id,key] of [['work','work'],['theme','theme'],['position','position'],['size','size'],['date-mode','dateMode']]) $(id).value = settings[key];
   await refreshCount();
@@ -270,11 +355,21 @@ async function init() {
     await updateSettings({...settings, items}); fillItems(); render(); status('写真項目を保存しました。');
   });
   for (const id of ['site', 'work', 'item', 'theme', 'position', 'size', 'date-mode', 'manual-date']) $(id).addEventListener('input', render);
+  $('position').addEventListener('change', () => { boardPlacement = {x:null,y:null}; render(); });
   for (const id of ['site','work','theme','position','size','date-mode']) $(id).addEventListener('change', run(async () => {
-    await updateSettings({...settings, selectedSite: $('site').value, work: $('work').value, theme: $('theme').value, position: $('position').value, size: $('size').value, dateMode: $('date-mode').value});
+    await saveCaptureSettings();
   }));
   $('camera').onchange = run(loadPhoto); $('import').onchange = run(loadPhoto); $('save').onclick = run(savePhoto);
   $('start-camera').onclick = run(startCamera); $('capture').onclick = run(captureLive); $('stop-camera').onclick = () => { stopCamera(); status('カメラを閉じました。'); };
+  for (const button of document.querySelectorAll('[data-move]')) button.onclick = run(() => moveBoard(button.dataset.move));
+  $('size-down').onclick = run(() => resizeBoard(-5)); $('size-up').onclick = run(() => resizeBoard(5));
+  $('edit-board').onclick = openBoardEditor; $('board-edit-hit').onclick = openBoardEditor;
+  $('editor-site').onchange = () => { $('editor-site-name').value = settings.sites.find(site => site.id === $('editor-site').value)?.name || ''; };
+  $('board-editor-form').onsubmit = applyBoardEditor;
+  $('editor-cancel').onclick = () => $('board-editor').close();
+  $('board-editor').addEventListener('close', render);
+  $('camera-screen').addEventListener('cancel', event => { event.preventDefault(); if (!busy) { stopCamera(); status('カメラを閉じました。'); } });
+  new ResizeObserver(layoutCamera).observe($('live-stage'));
   $('live-video').addEventListener('resize', renderLiveBoard);
   document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
   window.addEventListener('pagehide', stopCamera);
